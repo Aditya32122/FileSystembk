@@ -34,6 +34,22 @@ AWS.config.update({
 const s3 = new AWS.S3();
 
 
+
+const IBMCOS = require('ibm-cos-sdk');
+
+// IBM Cloud Object Storage configuration
+const ibmCosConfig = {
+  endpoint: process.env.IBM_COS_ENDPOINT, // e.g., 's3.us-south.cloud-object-storage.appdomain.cloud'
+  apiKeyId: process.env.IBM_COS_API_KEY,
+  ibmAuthEndpoint: 'https://iam.cloud.ibm.com/identity/token',
+  serviceInstanceId: process.env.IBM_COS_SERVICE_INSTANCE_ID, // CRN of your COS instance
+};
+
+// Create IBM COS client
+const ibmCos = new IBMCOS.S3(ibmCosConfig);
+
+
+
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 app.use(express.json());
@@ -75,7 +91,7 @@ async function uploadToExternal(filename, buffer) {
     {
       headers: {
         ...form.getHeaders(),
-        "Authorization": "Basic dHBfc3R1ZGVudDAwMTpXZWxjb21lcHdkMjAyNUAxMjM=",
+        "Authorization": "Basic dHBfc3R1ZGVud",
       },
       timeout: 5000,            // prevent hang
       validateStatus: () => true, // accept any status
@@ -120,6 +136,24 @@ async function downloadFromExternal(filename) {
     throw new Error("File not found in S3 bucket");
   }
 }
+
+// Function to download file from IBM Cloud Object Storage
+async function downloadFromIBMCOS(filename, bucketName = process.env.IBM_COS_BUCKET_NAME) {
+  const params = {
+    Bucket: bucketName,
+    Key: filename,
+  };
+
+  try {
+    console.log(`Downloading ${filename} from IBM COS bucket: ${bucketName}`);
+    const data = await ibmCos.getObject(params).promise();
+    return Buffer.from(data.Body);
+  } catch (err) {
+    console.error("Error fetching file from IBM COS:", err);
+    throw new Error(`File not found in IBM COS bucket: ${err.message}`);
+  }
+}
+
 
 // ---------- ROUTES ----------
 
