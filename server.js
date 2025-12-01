@@ -15,6 +15,7 @@ const { Storage } = require("@google-cloud/storage");
 
 const PORT = process.env.PORT || 3000;
 const KEY_HEX = process.env.SECRET_KEY_HEX;
+const basicauth = process.env.MFT_BASIC_AUTH; // Base64 encoded 'username:password'
 
 if (!KEY_HEX || KEY_HEX.length !== 64) {
   console.error("SECRET_KEY_HEX is missing or invalid");
@@ -91,7 +92,7 @@ async function uploadToExternal(filename, buffer) {
     {
       headers: {
         ...form.getHeaders(),
-        "Authorization": "Basic dHBfc3R1ZGVud",
+        "Authorization": `Basic ${basicauth}`,
       },
       timeout: 5000,            // prevent hang
       validateStatus: () => true, // accept any status
