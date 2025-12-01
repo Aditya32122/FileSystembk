@@ -1,0 +1,16 @@
+server/node_modules
+app/node_modules
+
+.cache
+.tmp
+# Dependency directories
+
+node_modules
+.pnp
+
+# Build directories
+build   
+build-ssr
+# Local environment files
+.env
+.env.local
