@@ -36,21 +36,6 @@ const s3 = new AWS.S3();
 
 
 
-// const IBMCOS = require('ibm-cos-sdk');
-
-// // IBM Cloud Object Storage configuration
-// const ibmCosConfig = {
-//   endpoint: process.env.IBM_COS_ENDPOINT, // e.g., 's3.us-south.cloud-object-storage.appdomain.cloud'
-//   apiKeyId: process.env.IBM_COS_API_KEY,
-//   ibmAuthEndpoint: 'https://iam.cloud.ibm.com/identity/token',
-//   serviceInstanceId: process.env.IBM_COS_SERVICE_INSTANCE_ID, // CRN of your COS instance
-// };
-
-// // Create IBM COS client
-// const ibmCos = new IBMCOS.S3(ibmCosConfig);
-
-
-
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 app.use(express.json());
@@ -94,7 +79,7 @@ async function uploadToExternal(filename, buffer) {
         ...form.getHeaders(),
         "Authorization": `Basic ${basicauth}`,
       },
-      timeout: 5000,            // prevent hang
+      timeout: 10000,            // prevent hang
       validateStatus: () => true, // accept any status
     }
   ).catch(err => {
@@ -104,6 +89,8 @@ async function uploadToExternal(filename, buffer) {
   // Immediately return without waiting
   return true;
 }
+
+
 
 // ---------- DOWNLOAD FROM GCP ----------
 // async function downloadFromExternal(filename) {
@@ -138,22 +125,48 @@ async function downloadFromExternal(filename) {
   }
 }
 
-// Function to download file from IBM Cloud Object Storage
-// async function downloadFromIBMCOS(filename, bucketName = process.env.IBM_COS_BUCKET_NAME) {
-//   const params = {
-//     Bucket: bucketName,
-//     Key: filename,
-//   };
+// Function to download file from backup bucket
+async function downloadFromBackupBucket(filename) {
+  const params = {
+    Bucket: "file-store-wm-2",
+    Key: filename,
+  };
 
-//   try {
-//     console.log(`Downloading ${filename} from IBM COS bucket: ${bucketName}`);
-//     const data = await ibmCos.getObject(params).promise();
-//     return Buffer.from(data.Body);
-//   } catch (err) {
-//     console.error("Error fetching file from IBM COS:", err);
-//     throw new Error(`File not found in IBM COS bucket: ${err.message}`);
-//   }
-// }
+  try {
+    const data = await s3.getObject(params).promise();
+    return Buffer.from(data.Body);
+  } catch (err) {
+    console.error("Error fetching file from backup S3 bucket:", err);
+    throw new Error("File not found in backup S3 bucket");
+  }
+}
+
+// DOWNLOAD FROM BACKUP BUCKET
+app.get("/files-backup/:id", async (req, res) => {
+  const id = req.params.id;
+
+  console.log(`[GET /files-backup/${id}]`);
+
+  const meta = await FilePrimary.findOne({ id });
+  if (!meta) return res.status(404).json({ error: "not found" });
+
+  try {
+    const encrypted = await downloadFromBackupBucket(meta.storage_path);
+    const now = sha256Hex(encrypted);
+
+    if (now !== meta.checksum) {
+      return res.status(500).json({ error: "Checksum mismatch" });
+    }
+
+    const plain = decryptBuffer(encrypted);
+    res.setHeader("Content-Disposition", `attachment; filename="${meta.filename}"`);
+    return res.send(plain);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "read error" });
+  }
+});
+
 
 
 // ---------- ROUTES ----------
@@ -220,167 +233,6 @@ app.get("/files/:id", async (req, res) => {
   }
 });
 
-
-// Add this new function after your existing downloadFromExternal function
-async function downloadFromBackupBucket(filename) {
-  const params = {
-    Bucket: "file-system-wm-2", // backup bucket
-    Key: filename,
-  };
-
-  try {
-    console.log(`Downloading ${filename} from backup bucket: file-system-wm-2`);
-    const data = await s3.getObject(params).promise();
-    return Buffer.from(data.Body);
-  } catch (err) {
-    console.error("Error fetching file from backup S3 bucket:", err);
-    throw new Error("File not found in backup S3 bucket");
-  }
-}
-
-// Enhanced download function with fallback support
-async function downloadWithFallback(filename) {
-  try {
-    // Try primary bucket first
-    console.log("Attempting download from primary bucket...");
-    return await downloadFromExternal(filename);
-  } catch (primaryError) {
-    console.warn("Primary bucket failed, trying backup bucket...");
-    try {
-      // Fallback to backup bucket
-      return await downloadFromBackupBucket(filename);
-    } catch (backupError) {
-      console.error("Both primary and backup downloads failed");
-      throw new Error("File not found in any bucket");
-    }
-  }
-}
-
-// Add new routes after your existing routes
-
-// DOWNLOAD FROM BACKUP BUCKET SPECIFICALLY
-app.get("/files/:id/backup", async (req, res) => {
-  const id = req.params.id;
-
-  console.log(`[GET /files/${id}/backup] - Downloading from backup bucket`);
-
-  const meta = await FilePrimary.findOne({ id });
-  if (!meta) return res.status(404).json({ error: "not found" });
-
-  try {
-    const encrypted = await downloadFromBackupBucket(meta.storage_path);
-    const now = sha256Hex(encrypted);
-
-    if (now !== meta.checksum) {
-      return res.status(500).json({ error: "Checksum mismatch in backup" });
-    }
-
-    const plain = decryptBuffer(encrypted);
-    res.setHeader("Content-Disposition", `attachment; filename="${meta.filename}"`);
-    res.setHeader("X-Downloaded-From", "backup-bucket");
-    return res.send(plain);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "backup bucket read error" });
-  }
-});
-
-// DOWNLOAD WITH AUTO-FALLBACK (enhanced main download)
-app.get("/files/:id/safe", async (req, res) => {
-  const id = req.params.id;
-
-  console.log(`[GET /files/${id}/safe] - Downloading with fallback support`);
-
-  const meta = await FilePrimary.findOne({ id });
-  if (!meta) return res.status(404).json({ error: "not found" });
-
-  try {
-    const encrypted = await downloadWithFallback(meta.storage_path);
-    const now = sha256Hex(encrypted);
-
-    if (now !== meta.checksum) {
-      return res.status(500).json({ error: "Checksum mismatch" });
-    }
-
-    const plain = decryptBuffer(encrypted);
-    res.setHeader("Content-Disposition", `attachment; filename="${meta.filename}"`);
-    res.setHeader("X-Downloaded-From", "primary-or-backup");
-    return res.send(plain);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "read error from both buckets" });
-  }
-});
-
-// HEALTH CHECK FOR BOTH BUCKETS
-app.get("/health/buckets", async (req, res) => {
-  const testFile = "test-health-check.txt";
-  const results = {};
-
-  // Test primary bucket
-  try {
-    await s3.headObject({ Bucket: "file-store-vq", Key: testFile }).promise();
-    results.primary = "accessible";
-  } catch (err) {
-    results.primary = err.code === 'NotFound' ? "accessible" : "error";
-  }
-
-  // Test backup bucket
-  try {
-    await s3.headObject({ Bucket: "file-system-wm-2", Key: testFile }).promise();
-    results.backup = "accessible";
-  } catch (err) {
-    results.backup = err.code === 'NotFound' ? "accessible" : "error";
-  }
-
-  res.json({
-    timestamp: new Date().toISOString(),
-    buckets: {
-      primary: { name: "file-store-vq", status: results.primary },
-      backup: { name: "file-system-wm-2", status: results.backup }
-    }
-  });
-});
-
-// VERIFY FILES IN BOTH BUCKETS
-app.get("/verify/both", async (req, res) => {
-  const rows = await FilePrimary.find({}, "id filename storage_path checksum -_id").lean();
-  const report = [];
-
-  for (const r of rows) {
-    let primaryStatus = "ok";
-    let backupStatus = "ok";
-
-    // Check primary bucket
-    try {
-      const encrypted = await downloadFromExternal(r.storage_path);
-      const checksum = sha256Hex(encrypted);
-      if (checksum !== r.checksum) primaryStatus = "mismatch";
-    } catch (err) {
-      primaryStatus = "missing";
-    }
-
-    // Check backup bucket
-    try {
-      const encrypted = await downloadFromBackupBucket(r.storage_path);
-      const checksum = sha256Hex(encrypted);
-      if (checksum !== r.checksum) backupStatus = "mismatch";
-    } catch (err) {
-      backupStatus = "missing";
-    }
-
-    report.push({
-      id: r.id,
-      filename: r.filename,
-      primary: primaryStatus,
-      backup: backupStatus,
-      overall: (primaryStatus === "ok" || backupStatus === "ok") ? "available" : "unavailable"
-    });
-  }
-
-  res.json(report);
-});
-
 // LIST
 app.get("/list", async (req, res) => {
   const rows = await FilePrimary.find({}, "id filename created_at -_id")
@@ -404,33 +256,7 @@ app.delete("/files/:id", async (req, res) => {
   return res.json({ message: "File deleted successfully" });
 });
 
-// VERIFY (only primary)
-app.get("/verify", async (req, res) => {
-  const rows = await FilePrimary.find({}, "id filename storage_path checksum -_id").lean();
-  const storage = new Storage();
-  const bucket = storage.bucket("file-storage-server");
 
-  const report = [];
-
-  for (const r of rows) {
-    let status = "ok";
-    try {
-      const file = bucket.file(r.storage_path);
-      const [exists] = await file.exists();
-      if (!exists) status = "missing";
-      else {
-        const [data] = await file.download();
-        const now = sha256Hex(data);
-        if (now !== r.checksum) status = "mismatch";
-      }
-    } catch {
-      status = "error";
-    }
-    report.push({ id: r.id, filename: r.filename, status });
-  }
-
-  res.json(report);
-});
 
 connectDB().then(() => {
   app.listen(PORT, () => console.log(`Main server running on port ${PORT}`));
